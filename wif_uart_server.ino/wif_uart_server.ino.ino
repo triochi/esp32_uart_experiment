@@ -3,9 +3,6 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 
-const char* ssid = "........";
-const char* password = "........";
-
 
 // Access Point credentials
 const char *apSSID = "ESP32C3_AP";
@@ -17,7 +14,7 @@ const char *staPassword = "AgenDuke@1234!";
 
 WebServer server(80);
 
-const int led = 13;
+const int led = LED_BUILTIN;
 
 void handleRoot() {
   digitalWrite(led, 1);
@@ -45,43 +42,43 @@ void handleNotFound() {
 void setup(void) {
   pinMode(led, OUTPUT);
   digitalWrite(led, 0);
+  delay(10);
   Serial.begin(115200);
-//
-//  // Start Access Point
-//  WiFi.softAP(apSSID, apPassword);
+
+  // Start Access Point
+  WiFi.softAP(apSSID, apPassword);
   Serial.println("Access Point started");
   Serial.print("AP IP Address: ");
-//  Serial.println(WiFi.softAPIP());
-  
-//  // Connect to Wi-Fi as a client
-//  WiFi.mode(WIFI_STA);
-//  WiFi.begin(staSSID, staPassword);
-//  Serial.println("");
-//
-//  // Wait for connection
-//  while (WiFi.status() != WL_CONNECTED) {
-//    delay(500);
-//    Serial.print(".");
-//  }
-//  Serial.println("");
+  Serial.println(WiFi.softAPIP());
+  delay(100);
+  // Connect to Wi-Fi as a client
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(staSSID, staPassword);
+  Serial.println("");
+
+  // Wait for connection
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
   Serial.print("Connected to ");
   Serial.println(staSSID);
   Serial.print("IP address: ");
-//  Serial.println(WiFi.localIP());
+  Serial.println(WiFi.localIP());
 
-//  if (MDNS.begin("esp32")) {
-//    Serial.println("MDNS responder started");
-//  }
-//
-//  server.on("/", handleRoot);
-//
-//  server.on("/inline", []() {
-//    server.send(200, "text/plain", "this works as well");
-//  });
-//
-//  server.onNotFound(handleNotFound);
+  if (MDNS.begin("esp32")) {
+    Serial.println("MDNS responder started");
+  }
 
-//  server.begin();
+  server.on("/", handleRoot);
+
+  server.on("/inline", []() {
+    server.send(200, "text/plain", "this works as well");
+  });
+
+  server.onNotFound(handleNotFound);
+  server.begin();
   Serial.println("HTTP server started");
 }
 
