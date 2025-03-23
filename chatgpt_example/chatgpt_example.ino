@@ -33,8 +33,7 @@ void setColor(int red, int green, int blue);
 // Function to determine if request comes from SoftAP or STA
 bool getConnectionIsAPType(IPAddress clientIP) {
     IPAddress apIP = WiFi.softAPIP();  // SoftAP's IP (e.g., 192.168.4.1)
-    uint32_t subnet = WiFi.softAPSubnetCIDR(); // Get SoftAP subnet mask
-
+    uint32_t subnet = WiFi.softAPSubnetMask(); // Get SoftAP subnet mask
     if ((clientIP & subnet) == (apIP & subnet)) {
         return true;
     } else {
@@ -54,7 +53,7 @@ String getRealMacAddress() {
 }
 
 void handleRoot_AP() {
-    String html = " <html><head> <title>ESP32 WiFi Setup</title>";
+    String html = " <html><head> <title>SolarStudio WiFi Setup</title>";
     html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
     html += "<style>body{font-family:Arial,sans-serif;display:flex;";
     html += "justify-content:center;align-items:center;height:100vh;";
@@ -76,9 +75,40 @@ void handleRoot_AP() {
     html += "<input type='submit' value='Save & Connect'> </form>";
     html += "<p class='mac'>Device MAC: ";
     html += getRealMacAddress();
-    html += "</p></div></body> </html>";
+    html += "</p>";
+    html += "<p class='mac'>Device STA IP address: ";
+    html += WiFi.localIP().toString();
+    html += "</p>";
+    html += "</div></body> </html>";
     server.send(200, "text/html", html);
 }
+
+
+void handleRoot_STA() {
+    String html = " <html><head> <title>SolarStudio 1.2</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    html += "<style>body{font-family:Arial,sans-serif;display:flex;";
+    html += "justify-content:center;align-items:center;height:100vh;";
+    html += "background:linear-gradient(to bottom,#808080,#3c8c6c);";
+    html += "margin: 0;}.container {background:rgba(255,255,255,0.9);";
+    html += "padding: 20px;border-radius:10px;box-shadow: 0px 0px 10px rgba(0,0,0,0.2);";
+    html += "text-align: center;width:90%;max-width:400px;}";
+    html += "h2{color: #3c8c6c;}input{width:100%;padding:10px;margin: 10px 0;";
+    html += "border:1px solid #ccc;border-radius:5px;font-size:16px;";
+    html += "}input[type='submit']{background:#3c8c6c;color: white;";
+    html += "border: none;cursor: pointer;font-weight: bold;}";
+    html += "input[type='submit']:hover{background: #2c6a4c;}";
+    html += ".mac {font-size: 14px;color: #555;margin-top: 15px;";
+    html += "font-weight: bold;}</style></head>";
+    html += "<body><div class='container'><h2>SolarStudio 1.2</h2>";
+    html += "<form action='/' method='post'><input type='text' name='plain' ";
+    html += "placeholder='Test json string' required><br> <br>";
+    html += "<input type='submit' value='Test'> </form>";
+    html += "</div></body> </html>";
+    server.send(200, "text/html", html);
+}
+
+
 
 // Handle form submission
 void handleSave() {
@@ -105,14 +135,17 @@ void handleSave() {
 
 // Function to handle JSON POST requests
 void handleRoot() {
-   IPAddress clientIP = server.client().remoteIP();  // Get client's IP address
-  bool isAPSequestType = getConnectionIsAPType(clientIP);
+  IPAddress clientIP = server.client().remoteIP();  // Get client's IP address
+  bool isAPRequestType = getConnectionIsAPType(clientIP);
+  Serial.println("\nClient IP: " +server.client().remoteIP().toString());
+  Serial.println(isAPRequestType?" AP":" STA");
   if (server.method() == HTTP_GET) {
-      pixel.setPixelColor(0, pixel.Color(128, 255, 0));
-      pixel.show();   // Turn off all pixels initially
-      server.send(200, "text/plain", "hello from esp32!");
-      pixel.setPixelColor(0, pixel.Color(255, 0, 0));
-      pixel.show();   // Turn off all pixels initially
+    if(isAPRequestType) {
+      handleRoot_AP();
+    }
+    else {
+      handleRoot_STA();
+    }
   }
   else if (server.method() == HTTP_POST) {
     if (server.hasArg("plain")) {  // Check if there's raw data
@@ -182,10 +215,6 @@ bool connectToWiFi() {
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
-        server.on("/", handleRoot);
-        server.begin();
-        Serial.println("HTTP server started. Mac address is:");
-        Serial.println(macAddress);
         return true;
     } else {
         Serial.println("\nWi-Fi Connection Failed.");
@@ -213,22 +242,30 @@ void setup() {
     pixel.show();   // Turn off all pixels initially
     pinMode(BOOT_BUTTON, INPUT_PULLUP);  // Set BOOT button as input with pull-up
     if (!connectToWiFi()) {
-        Serial.println("Starting SoftAP mode...");
-        WiFi.softAP(apSSID, apPassword);
-        Serial.print("SoftAP IP Address: ");
-        Serial.println(WiFi.softAPIP());
-
-        // Web server routes
-        server.on("/", handleRoot_AP);
-        server.on("/save", HTTP_POST, handleSave);
-
-        server.begin();
-        Serial.println("Web Server started in SoftAP mode.");
         setColor(0, 0, 255);  // Blue
     }
     else {
         setColor(0, 255, 0);  // Green
     }
+
+    Serial.println("Starting SoftAP mode...");
+    WiFi.softAP(apSSID, apPassword);
+    Serial.print("SoftAP IP Address: ");
+    Serial.println(WiFi.softAPIP());
+
+    // Web server routes
+    server.on("/", handleRoot);
+    server.on("/save", HTTP_POST, handleSave);
+
+    server.begin();
+    Serial.println("Web Server started in SoftAP mode.");
+
+    
+    server.on("/", handleRoot);
+    server.begin();
+    server.on("/save", HTTP_POST, handleSave);
+    Serial.println("HTTP server started. Mac address is:");
+    Serial.println(macAddress);
 
 
 
