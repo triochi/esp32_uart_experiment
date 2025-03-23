@@ -1,12 +1,17 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Adafruit_NeoPixel.h>
+#include <Preferences.h>
 #include <ArduinoJson.h>
 
 
 // LED Setup
 #define LED_PIN 8
 #define NUM_LEDS 1
+
+#define BOOT_BUTTON 9  // GPIO for BOOT button
+#define RESET_HOLD_TIME 5000  // 5 seconds hold time
+
 Adafruit_NeoPixel pixel(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // Access Point credentials
@@ -17,6 +22,9 @@ const char *apPassword = "12345678";
 const char *staSSID = "AgenDuke";
 const char *staPassword = "AgenDuke@1234!";
 WebServer server(80);
+Preferences preferences;
+
+void setColor(int red, int green, int blue);
 
 // Function to determine if request comes from SoftAP or STA
 bool getConnectionIsAPType(IPAddress clientIP) {
@@ -29,6 +37,70 @@ bool getConnectionIsAPType(IPAddress clientIP) {
         return false;
     }
 }
+
+// Function to serve the web page (only in SoftAP mode)
+//void handleRoot_AP() {
+//    String html = "<html><head><title>ESP32 WiFi Setup</title></head><body>";
+//    html += "<h2>WiFi Configuration</h2>";
+//    html += "<form action='/save' method='post'>";
+//    html += "SSID: <input type='text' name='ssid'><br>";
+//    html += "Password: <input type='password' name='password'><br>";
+//    html += "<input type='submit' value='Save & Connect'>";
+//    html += "</form></body></html>";
+//
+//    server.send(200, "text/html", html);
+//}
+
+void handleRoot_AP() {
+    String macAddress = WiFi.macAddress();  // Get MAC address
+    String html = " <html><head> <title>ESP32 WiFi Setup</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    html += "<style>body{font-family:Arial,sans-serif;display:flex;";
+    html += "justify-content:center;align-items:center;height:100vh;";
+    html += "background:linear-gradient(to bottom,#808080,#3c8c6c);";
+    html += "margin: 0;}.container {background:rgba(255,255,255,0.9);";
+    html += "padding: 20px;border-radius:10px;box-shadow: 0px 0px 10px rgba(0,0,0,0.2);";
+    html += "text-align: center;width:90%;max-width:400px;}";
+    html += "h2{color: #3c8c6c;}input{width:100%;padding:10px;margin: 10px 0;";
+    html += "border:1px solid #ccc;border-radius:5px;font-size:16px;";
+    html += "}input[type='submit']{background:#3c8c6c;color: white;";
+    html += "border: none;cursor: pointer;font-weight: bold;}";
+    html += "input[type='submit']:hover{background: #2c6a4c;}";
+    html += ".mac {font-size: 14px;color: #555;margin-top: 15px;";
+    html += "font-weight: bold;}</style></head>";
+    html += "<body><div class='container'><h2>WiFi Configuration</h2>";
+    html += "<form action='/save' method='post'><input type='text' name='ssid' ";
+    html += "placeholder='WiFi SSID' required><br> <input type='password' ";
+    html += "name='password' placeholder='WiFi Password' required><br>";
+    html += "<input type='submit' value='Save & Connect'> </form>";
+    html += "<p class='mac'>Device MAC: ";
+    html += macAddress;
+    html += "</p></div></body> </html>";
+    server.send(200, "text/html", html);
+}
+
+// Handle form submission
+void handleSave() {
+    if (server.hasArg("ssid") && server.hasArg("password")) {
+        String ssid = server.arg("ssid");
+        String password = server.arg("password");
+
+        // Store credentials in flash memory
+        preferences.begin("wifi", false);
+        preferences.putString("ssid", ssid);
+        preferences.putString("password", password);
+        preferences.end();
+
+        // Send response
+        server.send(200, "text/html", "<html><body><h2>WiFi Credentials Saved! Restarting...</h2></body></html>");
+
+        delay(2000);
+        ESP.restart();  // Restart to connect to Wi-Fi
+    } else {
+        server.send(400, "text/html", "Missing SSID or Password");
+    }
+}
+
 
 // Function to handle JSON POST requests
 void handleRoot() {
@@ -58,11 +130,11 @@ void handleRoot() {
         }
 
         // Extract values from JSON
-        command = doc["command"].as<String>();
-        identifier = doc["identifier"].as<int>();
-        delayTimeInSec = doc["delayTimeInSec"].as<int>();
-        workTimeInSec = doc["workTimeInSec"].as<int>();
-        coolTimeInSec = doc["coolTimeInSec"].as<int>();
+        String command = doc["command"].as<String>();
+        int identifier = doc["identifier"].as<int>();
+        int delayTimeInSec = doc["delayTimeInSec"].as<int>();
+        int workTimeInSec = doc["workTimeInSec"].as<int>();
+        int coolTimeInSec = doc["coolTimeInSec"].as<int>();
 
         // Print values to Serial Monitor
         Serial.println("Parsed JSON Data:");
@@ -83,33 +155,80 @@ void handleRoot() {
   }
 }
 
+
+// Connect to WiFi using stored credentials
+bool connectToWiFi() {
+    preferences.begin("wifi", true);
+    String ssid = preferences.getString("ssid", "");
+    String password = preferences.getString("password", "");
+    preferences.end();
+
+    if (ssid == "") {
+        Serial.println("No Wi-Fi credentials stored.");
+        return false;  // No saved credentials
+    }
+
+    WiFi.begin(ssid.c_str(), password.c_str());
+    Serial.print("Connecting to Wi-Fi: ");
+    Serial.println(ssid);
+
+    int timeout = 20; // 10 seconds timeout
+    while (WiFi.status() != WL_CONNECTED && timeout-- > 0) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
+        server.on("/", handleRoot);
+        server.begin();
+        Serial.println("HTTP server started");
+        return true;
+    } else {
+        Serial.println("\nWi-Fi Connection Failed.");
+        return false;
+    }
+}
+
+// Function to erase WiFi credentials and reset the device
+void factoryReset() {
+    Serial.println("Erasing WiFi credentials...");
+    
+    preferences.begin("wifi", false);
+    preferences.clear();  // Clear stored WiFi credentials
+    preferences.end();
+    
+    Serial.println("Restarting device...");
+    delay(2000);
+    ESP.restart();  // Restart ESP32 to apply changes
+}
+
 void setup() {
     Serial.begin(115200);
     pixel.begin();  // Initialize LED
     pixel.setPixelColor(0, pixel.Color(255, 0, 0));
     pixel.show();   // Turn off all pixels initially
-    // Start Access Point
-    WiFi.softAP(apSSID, apPassword);
-    Serial.println("Access Point started");
-    Serial.print("AP IP Address: ");
-    Serial.println(WiFi.softAPIP());
+    pinMode(BOOT_BUTTON, INPUT_PULLUP);  // Set BOOT button as input with pull-up
+    if (!connectToWiFi()) {
+        Serial.println("Starting SoftAP mode...");
+        WiFi.softAP(apSSID, apPassword);
+        Serial.print("SoftAP IP Address: ");
+        Serial.println(WiFi.softAPIP());
 
-    // Connect to Wi-Fi as a client
-    WiFi.begin(staSSID, staPassword);
-    Serial.print("Connecting to WiFi...");
-    
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+        // Web server routes
+        server.on("/", handleRoot_AP);
+        server.on("/save", HTTP_POST, handleSave);
+
+        server.begin();
+        Serial.println("Web Server started in SoftAP mode.");
+        setColor(0, 0, 255);  // Blue
+    }
+    else {
+        setColor(0, 255, 0);  // Green
     }
 
-    Serial.println("\nConnected to WiFi!");
-    Serial.print("Station IP Address: ");
-    Serial.println(WiFi.localIP());
 
-    server.on("/", handleRoot);
-    server.begin();
-    Serial.println("HTTP server started");
+
 //    
 //    setColor(255, 0, 0);  // Red
 //    delay(1000);
@@ -123,6 +242,25 @@ void setup() {
 }
 
 void loop() {
+    static unsigned long buttonPressTime = 0;
+    static bool buttonHeld = false;
+
+    if (digitalRead(BOOT_BUTTON) == LOW) {  // Button is pressed
+        if (!buttonHeld) {  // First detection of press
+            buttonPressTime = millis();  // Save time of press
+            buttonHeld = true;
+            Serial.println("BOOT button pressed...");
+        }
+        
+        // Check if button is held for required time
+        if (millis() - buttonPressTime >= RESET_HOLD_TIME) {
+            Serial.println("Factory Reset Initiated!");
+            setColor(128, 0, 128); // PURPLE
+            factoryReset();
+        }
+    } else {
+        buttonHeld = false;  // Reset state when button is released
+    }
     // Keep the AP and Client active
     server.handleClient();
     delay(5);  //allow the cpu to switch to other tasks
