@@ -3,6 +3,9 @@
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_mac.h"
 
 
 // LED Setup
@@ -21,6 +24,7 @@ const char *apPassword = "12345678";
 // Wi-Fi Client (Station) credentials
 const char *staSSID = "AgenDuke";
 const char *staPassword = "AgenDuke@1234!";
+String macAddress = "n.a";
 WebServer server(80);
 Preferences preferences;
 
@@ -38,21 +42,18 @@ bool getConnectionIsAPType(IPAddress clientIP) {
     }
 }
 
-// Function to serve the web page (only in SoftAP mode)
-//void handleRoot_AP() {
-//    String html = "<html><head><title>ESP32 WiFi Setup</title></head><body>";
-//    html += "<h2>WiFi Configuration</h2>";
-//    html += "<form action='/save' method='post'>";
-//    html += "SSID: <input type='text' name='ssid'><br>";
-//    html += "Password: <input type='password' name='password'><br>";
-//    html += "<input type='submit' value='Save & Connect'>";
-//    html += "</form></body></html>";
-//
-//    server.send(200, "text/html", html);
-//}
+String getRealMacAddress() {
+    uint8_t baseMac[6];
+    esp_efuse_mac_get_default(baseMac); // Get the factory-set MAC
+
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
+
+    return String(macStr);
+}
 
 void handleRoot_AP() {
-    String macAddress = WiFi.macAddress();  // Get MAC address
     String html = " <html><head> <title>ESP32 WiFi Setup</title>";
     html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
     html += "<style>body{font-family:Arial,sans-serif;display:flex;";
@@ -74,7 +75,7 @@ void handleRoot_AP() {
     html += "name='password' placeholder='WiFi Password' required><br>";
     html += "<input type='submit' value='Save & Connect'> </form>";
     html += "<p class='mac'>Device MAC: ";
-    html += macAddress;
+    html += getRealMacAddress();
     html += "</p></div></body> </html>";
     server.send(200, "text/html", html);
 }
@@ -171,6 +172,7 @@ bool connectToWiFi() {
     WiFi.begin(ssid.c_str(), password.c_str());
     Serial.print("Connecting to Wi-Fi: ");
     Serial.println(ssid);
+    macAddress = WiFi.macAddress();  // Get MAC address
 
     int timeout = 20; // 10 seconds timeout
     while (WiFi.status() != WL_CONNECTED && timeout-- > 0) {
@@ -182,7 +184,8 @@ bool connectToWiFi() {
         Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
         server.on("/", handleRoot);
         server.begin();
-        Serial.println("HTTP server started");
+        Serial.println("HTTP server started. Mac address is:");
+        Serial.println(macAddress);
         return true;
     } else {
         Serial.println("\nWi-Fi Connection Failed.");
