@@ -14,6 +14,9 @@
 
 #define BOOT_BUTTON 9  // GPIO for BOOT button
 #define RESET_HOLD_TIME 5000  // 5 seconds hold time
+#define RXD1 18  // OK!
+#define TXD1 19  // OK!
+
 
 Adafruit_NeoPixel pixel(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -27,8 +30,16 @@ const char *staPassword = "AgenDuke@1234!";
 String macAddress = "n.a";
 WebServer server(80);
 Preferences preferences;
+int pre_time;
+int work_time;
+int cool_time;
+int retry;
+unsigned char device = 255;
+unsigned char checksum;
+unsigned char  remote_check_sum;
 
 void setColor(int red, int green, int blue);
+void SendTime();
 
 // Function to determine if request comes from SoftAP or STA
 bool getConnectionIsAPType(IPAddress clientIP) {
@@ -177,9 +188,21 @@ void handleRoot() {
         Serial.println("Delay Time: " + String(delayTimeInSec) + " sec");
         Serial.println("Work Time: " + String(workTimeInSec) + " sec");
         Serial.println("Cool Time: " + String(coolTimeInSec) + " sec");
-
-        // Send a success response
-        server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Command received\"}");
+        pre_time = delayTimeInSec/60;
+        work_time = workTimeInSec/60;
+        cool_time = coolTimeInSec/60;
+        device = identifier;
+        SendTime();
+        Serial.println("Result: " + String(retry));
+        // Send a response
+        if(retry >= 22) {
+          server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Command received\"}");
+        }
+        else {
+//             checksum = (pre_time + cool_time - time_in_hex - 5) & 0x7F;
+//    remote_check_sum = 220;
+          server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No communication with solarium\""+String(checksum)+ " - "+String(remote_check_sum)+"}");
+        }
     } else {
         server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No JSON received\"}");
     }
@@ -235,8 +258,100 @@ void factoryReset() {
     ESP.restart();  // Restart ESP32 to apply changes
 }
 
+int ToBCD(int value)
+{  
+  int digits[3];
+  int result;
+  digits[0] = value %10;
+  digits[1] = (value/10) % 10;
+  digits[2] = (value/100) % 10;
+  result = digits[0] | (digits[1]<<4) | (digits[2]<<8);
+  return result;
+}
+
+int FromBCD(int value){
+  int digits[3];
+  int result;
+  digits[0] = value & 0x0F;
+  digits[1] = (value>>4) & 0x0F;
+  digits[2] = (value>>8) & 0x0F;
+  result = digits[0] + digits[1]*10 + digits[2]*100;
+  return result;
+}
+signed char get_solarium_status(int n){
+
+  signed char data; 
+  // send conmmand for status request
+  
+  Serial1.print(0x80 | ((n & 0x0f) << 3) | 0);
+  
+  delay(70);
+
+  if (Serial1.available() > 0)
+  {
+    char data = Serial1.read();
+    return (data);
+  }
+  return -1;
+}
+
+
+void SendTime()
+{
+  // checksum: CoolTime + Pre-Time - 5 - MainTime
+  while( Serial1.available() > 0)
+  {
+    Serial1.read();
+  }
+  device = 14;
+  int time_in_hex = /*ToBCD*/(work_time);
+  while (retry < 20){
+    // clear in FIFO
+    checksum = (pre_time + cool_time - time_in_hex - 5) & 0x7F;
+    remote_check_sum = 220;
+
+    Serial1.print(0x80U | ((device & 0x0fU) << 3U) | 2U); //Command 2 == Pre_time_set
+    delay(2);
+    Serial1.print(pre_time);
+
+    delay(2);
+    Serial1.print(0x80U | ((device & 0x0fU) << 3U) | 5U); //Command 5 == Main time set
+
+    delay(2);
+    Serial1.print(time_in_hex);
+
+    delay(2);
+
+    Serial1.read(); //"Read" old time
+
+    delay(2);
+    Serial1.print(0x80U | ((device & 0x0fU) << 3U) | 3U); //Command 3 == Cool Time set
+
+    delay(2);
+    Serial1.print(cool_time);
+
+    delay(4);
+
+    remote_check_sum = Serial1.read(); //"Read" checksum
+
+    delay(20);
+   
+    //      checksum = remote_check_sum;
+    if (remote_check_sum == checksum){
+      delay(2);
+      Serial1.print(checksum);
+      retry = 22;
+    }
+    Serial.println("local checksum: " + String(checksum));
+    Serial.println("remote checksum: " + String(remote_check_sum));
+    retry++;
+  }
+}
+
 void setup() {
     Serial.begin(115200);
+    Serial1.begin(1200, SERIAL_8N1, RXD1, TXD1);
+    pinMode(RXD1,INPUT_PULLUP);
     pixel.begin();  // Initialize LED
     pixel.setPixelColor(0, pixel.Color(255, 0, 0));
     pixel.show();   // Turn off all pixels initially
@@ -290,6 +405,9 @@ void loop() {
             buttonPressTime = millis();  // Save time of press
             buttonHeld = true;
             Serial.println("BOOT button pressed...");
+//             Serial1.println("BOOT button pressed...");
+            get_solarium_status(14);
+            
         }
         
         // Check if button is held for required time
