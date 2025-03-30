@@ -6,6 +6,7 @@
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
+#include <HardwareSerial.h>
 
 
 // LED Setup
@@ -14,9 +15,10 @@
 
 #define BOOT_BUTTON 9  // GPIO for BOOT button
 #define RESET_HOLD_TIME 5000  // 5 seconds hold time
-#define RXD1 18  // OK!
-#define TXD1 19  // OK!
+#define RXD1 2 
+#define TXD1 1 
 
+HardwareSerial serial1(1);
 
 Adafruit_NeoPixel pixel(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -283,13 +285,13 @@ signed char get_solarium_status(int n){
   signed char data; 
   // send conmmand for status request
   
-  Serial1.print(0x80 | ((n & 0x0f) << 3) | 0);
+  serial1.write(0x80 | ((n & 0x0f) << 3) | 0);
   
   delay(70);
 
-  if (Serial1.available() > 0)
+  if (serial1.available() > 0)
   {
-    char data = Serial1.read();
+    char data = serial1.read();
     return (data);
   }
   return -1;
@@ -299,47 +301,57 @@ signed char get_solarium_status(int n){
 void SendTime()
 {
   // checksum: CoolTime + Pre-Time - 5 - MainTime
-  while( Serial1.available() > 0)
-  {
-    Serial1.read();
-  }
+  
   device = 14;
+  retry = 0;
+  while(serial1.available()){
+    serial1.read(); //Flush buffer
+  }
   int time_in_hex = /*ToBCD*/(work_time);
   while (retry < 20){
     // clear in FIFO
     checksum = (pre_time + cool_time - time_in_hex - 5) & 0x7F;
     remote_check_sum = 220;
 
-    Serial1.print(0x80U | ((device & 0x0fU) << 3U) | 2U); //Command 2 == Pre_time_set
+    serial1.write(0x80U | ((device & 0x0fU) << 3U) | 2U); //Command 2 == Pre_time_set
     delay(2);
-    Serial1.print(pre_time);
-
-    delay(2);
-    Serial1.print(0x80U | ((device & 0x0fU) << 3U) | 5U); //Command 5 == Main time set
+    serial1.write(pre_time);
 
     delay(2);
-    Serial1.print(time_in_hex);
+    serial1.write(0x80U | ((device & 0x0fU) << 3U) | 5U); //Command 5 == Main time set
+
+    delay(2);
+    serial1.write(time_in_hex);
 
     delay(2);
 
-    Serial1.read(); //"Read" old time
+    serial1.read(); //"Read" old time
 
     delay(2);
-    Serial1.print(0x80U | ((device & 0x0fU) << 3U) | 3U); //Command 3 == Cool Time set
+    serial1.write(0x80U | ((device & 0x0fU) << 3U) | 3U); //Command 3 == Cool Time set
 
     delay(2);
-    Serial1.print(cool_time);
-
-    delay(4);
-
-    remote_check_sum = Serial1.read(); //"Read" checksum
-
+    serial1.write(cool_time);
+    serial1.flush();  // Blocks until TX buffer is completely empty
+    
     delay(20);
+    if(serial1.available()){
+      remote_check_sum = serial1.read(); //"Read" checksum
+    }
+    else {
+      delay(20);
+      if(serial1.available()){
+        remote_check_sum = serial1.read(); //"Read" checksum
+      }
+    }
+
+    delay(2);
    
     //      checksum = remote_check_sum;
-    if (remote_check_sum == checksum){
+    if (remote_check_sum == checksum)
+    {
       delay(2);
-      Serial1.print(checksum);
+      serial1.write(checksum);
       retry = 22;
     }
     Serial.println("local checksum: " + String(checksum));
@@ -350,8 +362,6 @@ void SendTime()
 
 void setup() {
     Serial.begin(115200);
-    Serial1.begin(1200, SERIAL_8N1, RXD1, TXD1);
-    pinMode(RXD1,INPUT_PULLUP);
     pixel.begin();  // Initialize LED
     pixel.setPixelColor(0, pixel.Color(255, 0, 0));
     pixel.show();   // Turn off all pixels initially
@@ -382,8 +392,11 @@ void setup() {
     Serial.println("HTTP server started. Mac address is:");
     Serial.println(macAddress);
 
-
-
+    pinMode(RXD1,INPUT_PULLUP);
+    serial1.end();  // Stop UART1 if already running
+    serial1.begin(1200, SERIAL_8N1, RXD1, TXD1);
+    delay(100);  // Short delay
+  
 //    
 //    setColor(255, 0, 0);  // Red
 //    delay(1000);
@@ -405,7 +418,6 @@ void loop() {
             buttonPressTime = millis();  // Save time of press
             buttonHeld = true;
             Serial.println("BOOT button pressed...");
-//             Serial1.println("BOOT button pressed...");
             get_solarium_status(14);
             
         }
@@ -422,6 +434,12 @@ void loop() {
     // Keep the AP and Client active
     server.handleClient();
     delay(5);  //allow the cpu to switch to other tasks
+    if (serial1.available() > 0)
+    {
+      char data = serial1.read();
+      Serial.print(" 0x");
+      Serial.print(data,HEX);
+    }
 }
 
 // Function to set color (RGB)
