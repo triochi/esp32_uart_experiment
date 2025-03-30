@@ -6,7 +6,9 @@
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
+#include "esp_ota_ops.h"
 #include <HardwareSerial.h>
+#include <Update.h>
 
 
 // LED Setup
@@ -43,6 +45,45 @@ unsigned char  remote_check_sum;
 void setColor(int red, int green, int blue);
 void SendTime();
 
+// HTML for OTA update page
+const char* updatePage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 OTA Update</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: linear-gradient(to bottom, #ccc, #8BC34A); }
+        h2 { color: white; }
+        form { margin-top: 20px; }
+        input { padding: 10px; font-size: 16px; }
+        progress { width: 100%; height: 30px; }
+    </style>
+</head>
+<body>
+    <h2>ESP32 OTA Update</h2>
+    <form method="POST" action="/update" enctype="multipart/form-data">
+        <input type="file" name="firmware">
+        <input type="submit" value="Upload">
+    </form>
+    <progress id="progress" value="0" max="100"></progress>
+    <script>
+        let progressBar = document.getElementById('progress');
+        let form = document.querySelector('form');
+        form.addEventListener('submit', function() {
+            let interval = setInterval(() => {
+                fetch('/progress').then(res => res.text()).then(percent => {
+                    progressBar.value = percent;
+                    if (percent >= 100) clearInterval(interval);
+                });
+            }, 500);
+        });
+    </script>
+</body>
+</html>
+)rawliteral";
+
+
+
 // Function to determine if request comes from SoftAP or STA
 bool getConnectionIsAPType(IPAddress clientIP) {
     IPAddress apIP = WiFi.softAPIP();  // SoftAP's IP (e.g., 192.168.4.1)
@@ -63,6 +104,85 @@ String getRealMacAddress() {
              baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
 
     return String(macStr);
+}
+
+// Return upload progress
+void handleProgress() {
+    server.send(200, "text/plain", String(Update.progress()));
+}
+
+// Check and rollback if needed
+void checkRollback() {
+    const esp_partition_t* boot = esp_ota_get_boot_partition();
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    const esp_partition_t* invalid = esp_ota_get_last_invalid_partition();
+
+    Serial.printf("Boot Partition: %s\n", boot->label);
+    Serial.printf("Running Partition: %s\n", running->label);
+
+    if (boot != running) {
+        Serial.println("⚠️ Warning: Running from temporary OTA partition!");
+        if (invalid) {
+            Serial.println("⚠️ Rolling back to previous firmware...");
+            esp_ota_set_boot_partition(invalid);
+            ESP.restart();
+        }
+    } else {
+        Serial.println("✅ ESP32 is running from a valid firmware.");
+    }
+}
+
+
+// OTA Upload Handler (Fail-Safe)
+void handleUpdate() {
+    Serial.printf("Ready to receive a file\n");
+    HTTPUpload& upload = server.upload();
+    Serial.printf("Upload Status: %d, Filename: %s, Bytes: %d\n", upload.status, upload.filename.c_str(), upload.currentSize);
+
+    Serial.printf("Total Bytes Written: %d\n", Update.progress());
+    Serial.printf("Is Update Finished? %s\n", Update.isFinished() ? "Yes" : "No");
+    Serial.printf("Free Sketch Space: %d bytes\n", ESP.getFreeSketchSpace());
+    Serial.printf("Update Error: %s\n", Update.hasError() ? "Yes" : "No");
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("Updating: %s\n", upload.filename.c_str());
+
+        // Start OTA Update
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+              Serial.println("❌ Update.begin() failed!");
+              Update.printError(Serial);
+        } else {
+              Serial.println("✅ Update.begin() successful!");
+        }
+    } 
+    else if (upload.status == UPLOAD_FILE_WRITE) {
+        Serial.printf("Writing %d bytes...\n", upload.currentSize);
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Serial.println("❌ Write failed!");
+            Update.printError(Serial);
+        }
+        delay(10);  // Add a short delay to allow processing
+    }
+    else if (upload.status == UPLOAD_FILE_END) {
+        if (1 || Update.end(true)) {  
+            Serial.println("✅ Update successful! Rebooting...");
+
+            server.send(200, "text/html", "<h2>Update Complete! Rebooting...</h2>");
+            delay(1000);
+            ESP.restart();  
+        } else {
+            Serial.println("❌ Update failed!");
+
+            // Rollback: Set the boot partition back to the previous firmware
+            const esp_partition_t* lastPartition = esp_ota_get_last_invalid_partition();
+            if (lastPartition) {
+                Serial.println("⚠️ Rolling back to previous firmware...");
+                esp_ota_set_boot_partition(lastPartition);
+                ESP.restart();
+            }
+
+            server.send(500, "text/html", "<h2>Update Failed! Rolling back...</h2>");
+        }
+    }
 }
 
 void handleRoot_AP() {
@@ -201,8 +321,6 @@ void handleRoot() {
           server.send(200, "application/json", "{\"status\":\"success\",\"message\":\"Command received\"}");
         }
         else {
-//             checksum = (pre_time + cool_time - time_in_hex - 5) & 0x7F;
-//    remote_check_sum = 220;
           server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No communication with solarium\""+String(checksum)+ " - "+String(remote_check_sum)+"}");
         }
     } else {
@@ -311,7 +429,7 @@ void SendTime()
   while (retry < 20){
     // clear in FIFO
     checksum = (pre_time + cool_time - time_in_hex - 5) & 0x7F;
-    remote_check_sum = 220;
+    remote_check_sum = 255;
 
     serial1.write(0x80U | ((device & 0x0fU) << 3U) | 2U); //Command 2 == Pre_time_set
     delay(2);
@@ -354,14 +472,24 @@ void SendTime()
       serial1.write(checksum);
       retry = 22;
     }
-    Serial.println("local checksum: " + String(checksum));
-    Serial.println("remote checksum: " + String(remote_check_sum));
+//    Serial.println("local checksum: " + String(checksum));
+//    Serial.println("remote checksum: " + String(remote_check_sum));
     retry++;
   }
 }
 
+// Serve the OTA webpage
+void handleOta() {
+    server.send(200, "text/html", updatePage);
+}
+
+
 void setup() {
     Serial.begin(115200);
+
+    // Check if rollback is needed
+    checkRollback();
+    
     pixel.begin();  // Initialize LED
     pixel.setPixelColor(0, pixel.Color(255, 0, 0));
     pixel.show();   // Turn off all pixels initially
@@ -377,18 +505,16 @@ void setup() {
     WiFi.softAP(apSSID, apPassword);
     Serial.print("SoftAP IP Address: ");
     Serial.println(WiFi.softAPIP());
+    Serial.println("Web Server started in SoftAP mode.");
 
     // Web server routes
     server.on("/", handleRoot);
     server.on("/save", HTTP_POST, handleSave);
-
-    server.begin();
-    Serial.println("Web Server started in SoftAP mode.");
-
     
-    server.on("/", handleRoot);
+    server.on("/ota", handleOta);
+    server.on("/update", HTTP_POST, handleUpdate);
+    server.on("/progress", handleProgress);
     server.begin();
-    server.on("/save", HTTP_POST, handleSave);
     Serial.println("HTTP server started. Mac address is:");
     Serial.println(macAddress);
 
@@ -396,6 +522,9 @@ void setup() {
     serial1.end();  // Stop UART1 if already running
     serial1.begin(1200, SERIAL_8N1, RXD1, TXD1);
     delay(100);  // Short delay
+
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    Serial.printf("Running Partition: %s\n", running->label);
   
 //    
 //    setColor(255, 0, 0);  // Red
