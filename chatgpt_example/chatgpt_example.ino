@@ -9,6 +9,7 @@
 #include "esp_ota_ops.h"
 #include <HardwareSerial.h>
 #include <Update.h>
+#include <WebOTA.h>
 
 
 // LED Setup
@@ -54,30 +55,13 @@ const char* updatePage = R"rawliteral(
     <style>
         body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: linear-gradient(to bottom, #ccc, #8BC34A); }
         h2 { color: white; }
-        form { margin-top: 20px; }
-        input { padding: 10px; font-size: 16px; }
-        progress { width: 100%; height: 30px; }
     </style>
+    <script>
+      window.location.href = window.location.protocol + "//" + window.location.hostname + ":8080/update";
+    </script>
 </head>
 <body>
     <h2>ESP32 OTA Update</h2>
-    <form method="POST" action="/update" enctype="multipart/form-data">
-        <input type="file" name="firmware">
-        <input type="submit" value="Upload">
-    </form>
-    <progress id="progress" value="0" max="100"></progress>
-    <script>
-        let progressBar = document.getElementById('progress');
-        let form = document.querySelector('form');
-        form.addEventListener('submit', function() {
-            let interval = setInterval(() => {
-                fetch('/progress').then(res => res.text()).then(percent => {
-                    progressBar.value = percent;
-                    if (percent >= 100) clearInterval(interval);
-                });
-            }, 500);
-        });
-    </script>
 </body>
 </html>
 )rawliteral";
@@ -106,11 +90,6 @@ String getRealMacAddress() {
     return String(macStr);
 }
 
-// Return upload progress
-void handleProgress() {
-    server.send(200, "text/plain", String(Update.progress()));
-}
-
 // Check and rollback if needed
 void checkRollback() {
     const esp_partition_t* boot = esp_ota_get_boot_partition();
@@ -132,58 +111,6 @@ void checkRollback() {
     }
 }
 
-
-// OTA Upload Handler (Fail-Safe)
-void handleUpdate() {
-    Serial.printf("Ready to receive a file\n");
-    HTTPUpload& upload = server.upload();
-    Serial.printf("Upload Status: %d, Filename: %s, Bytes: %d\n", upload.status, upload.filename.c_str(), upload.currentSize);
-
-    Serial.printf("Total Bytes Written: %d\n", Update.progress());
-    Serial.printf("Is Update Finished? %s\n", Update.isFinished() ? "Yes" : "No");
-    Serial.printf("Free Sketch Space: %d bytes\n", ESP.getFreeSketchSpace());
-    Serial.printf("Update Error: %s\n", Update.hasError() ? "Yes" : "No");
-    if (upload.status == UPLOAD_FILE_START) {
-        Serial.printf("Updating: %s\n", upload.filename.c_str());
-
-        // Start OTA Update
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-              Serial.println("❌ Update.begin() failed!");
-              Update.printError(Serial);
-        } else {
-              Serial.println("✅ Update.begin() successful!");
-        }
-    } 
-    else if (upload.status == UPLOAD_FILE_WRITE) {
-        Serial.printf("Writing %d bytes...\n", upload.currentSize);
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-            Serial.println("❌ Write failed!");
-            Update.printError(Serial);
-        }
-        delay(10);  // Add a short delay to allow processing
-    }
-    else if (upload.status == UPLOAD_FILE_END) {
-        if (1 || Update.end(true)) {  
-            Serial.println("✅ Update successful! Rebooting...");
-
-            server.send(200, "text/html", "<h2>Update Complete! Rebooting...</h2>");
-            delay(1000);
-            ESP.restart();  
-        } else {
-            Serial.println("❌ Update failed!");
-
-            // Rollback: Set the boot partition back to the previous firmware
-            const esp_partition_t* lastPartition = esp_ota_get_last_invalid_partition();
-            if (lastPartition) {
-                Serial.println("⚠️ Rolling back to previous firmware...");
-                esp_ota_set_boot_partition(lastPartition);
-                ESP.restart();
-            }
-
-            server.send(500, "text/html", "<h2>Update Failed! Rolling back...</h2>");
-        }
-    }
-}
 
 void handleRoot_AP() {
     String html = " <html><head> <title>SolarStudio WiFi Setup</title>";
@@ -512,8 +439,6 @@ void setup() {
     server.on("/save", HTTP_POST, handleSave);
     
     server.on("/ota", handleOta);
-    server.on("/update", HTTP_POST, handleUpdate);
-    server.on("/progress", handleProgress);
     server.begin();
     Serial.println("HTTP server started. Mac address is:");
     Serial.println(macAddress);
@@ -525,6 +450,7 @@ void setup() {
 
     const esp_partition_t* running = esp_ota_get_running_partition();
     Serial.printf("Running Partition: %s\n", running->label);
+    webota.init(8080, "/update");
   
 //    
 //    setColor(255, 0, 0);  // Red
@@ -562,6 +488,7 @@ void loop() {
     }
     // Keep the AP and Client active
     server.handleClient();
+    webota.handle();
     delay(5);  //allow the cpu to switch to other tasks
     if (serial1.available() > 0)
     {
