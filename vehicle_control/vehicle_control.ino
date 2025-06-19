@@ -34,8 +34,44 @@ long lastWrite = 0;
 long lastUpdate = 0;
 int lastValve = 0;
 
+
+// Task handle for motor control task
+TaskHandle_t motorTaskHandle = NULL;
+
+// Shared target position (use volatile for safe access between tasks)
+volatile long targetPosition = 0;
+volatile bool newPositionAvailable = false;
+
+// WiFi AP credentials
+const char* ssid = "MyESP32_AP";
+const char* password = "12345678";  // must be at least 8 characters
+
+void motorTask(void * parameter) {
+  while (true) {
+    // Check if a new position has been set
+    if (newPositionAvailable) {
+      // Locking mechanism is minimal here; consider mutex if you expect race conditions
+      long pos = targetPosition;
+      newPositionAvailable = false;
+
+      motor.moveTo(pos);
+      motor.runToPosition();  // blocking call, safe here because WiFi runs separately
+    }
+    // Let other tasks run
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+
+  // Setup ESP32 as WiFi Access Point
+  WiFi.softAP(ssid, password);
+
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("Access Point IP address: ");
+  Serial.println(IP);
   pinMode(ON_OF_Pin, INPUT);
 
   motor.setMaxSpeed(600);
@@ -44,6 +80,17 @@ void setup() {
   takenSteps = readSteps();
   lastWrite = millis();
   lastUpdate = lastWrite;
+   targetPosition = 0;
+  newPositionAvailable = true;
+
+  xTaskCreate(
+    motorTask,
+    "MotorControl",
+    4096,
+    NULL,
+    1,
+    &motorTaskHandle
+  );
 }
 
 void reset() {
